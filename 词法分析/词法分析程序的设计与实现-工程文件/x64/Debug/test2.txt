@@ -1,0 +1,411 @@
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+using namespace std;
+
+//HEX转DEC
+int get_val(char *s, int n) {
+    int res = 0;
+    for (int i = 0; i < n; i++) {
+        if (s[i] >='A'&&s[i]<='F') res = (res << 4) | (s[i] - 'A' + 10);
+        else if(s[i] >='0'&&s[i]<='9')res = (res << 4) | (s[i] - '0');
+        else return -1;
+    }
+    return res;
+}
+
+
+struct VM {
+    const char *CMD[14] = {"RUN", "STOP", "ECHO", "ADD", "INC", "MOV", "CMP",
+                           "JMP", "JG", "JL", "JE", "JNG", "JNL", "JNE"
+    };
+
+    int lines;
+    //程序（汇编代码）存储区
+    char code[103][20];
+    //存储器
+    FILE* fp;
+    unsigned mem[0x10000];
+    //寄存器数组AX/BX/CX/DX
+    unsigned reg[4];
+
+    //程序计数器
+    int PC;
+    //指令编号
+    int cmd;
+    //
+    int terminated;
+    //指令的操作数部分
+    char sa[10], sb[10];
+    int va, vb;
+    int ta, tb;
+    //CMP结果，1=L 2=E 3=G
+    int cmp_result;//运行前初始化为0表示从未执行过CMP
+
+    VM() : lines(0), PC(0), ta(-1), tb(-1), cmp_result(0),terminated(0) {
+        memset(mem, 0, sizeof(mem));
+        memset(reg, 0, sizeof(reg));
+        memset(code, 0, sizeof(code));
+    }
+
+    void read() {
+        //初始化总行数，程序计数器为0
+        lines = PC = 0;
+        while (fgets(code[lines], sizeof(code[lines]), fp)) lines++;
+    }
+    //读取一行汇编代码
+    void read_next() {
+
+        int len = strlen(code[PC]);
+
+        int blank = 0;
+        char tmp[10];
+        int l = 0;
+        for (int i = 0; i < len; i++) {
+            if (code[PC][i] == ' ' || code[PC][i] == '\n' || code[PC][i] == '\r') {
+                tmp[l] = 0;
+//        printf("(%s)\n", tmp);
+                //遇到第1个空字符->确定指令助记符
+                if (blank == 0) {
+                    for  (int j = 0; j < 14; j++) {
+                        if (strcmp(CMD[j], tmp) == 0) {
+                            cmd = j;
+                            break;
+                        }
+                    }
+                    //遇到第2个空字符->确定第1个操作数
+                } else if (blank == 1) {
+                    strcpy(sa, tmp);
+                    //遇到第3个空字符->确定第2个操作数
+                } else if (blank == 2) {
+                    strcpy(sb, tmp);
+                }
+                blank++;
+                l = 0;
+            } else {
+                tmp[l++] = code[PC][i];
+            }
+        }
+    }
+    //指令分析，根据各操作数寻址方式，确定操作数所在位置性质，及相应的操作数值/位置
+    //获取操作数所在位置性质，若指令有第1个操作数，属性存入ta，若指令有第2个操作数，属性存入tb
+    //2表示操作数在寄存器，1表示操作数在存储器，0表示操作数是立即数
+    //获取操作数的值或位置，若指令有第1个操作数，结果存入va，若指令有第2个操作数，结果存入vb
+    //操作数在寄存器时，结果为寄存器数组的下标
+    //操作数在存储器时，结果为存储器中的地址
+    //操作数为立即数时，结果为立即数的值
+    void translate() {
+
+        ta = tb = -1;
+        int len_a = 0, len_b = 0;
+        switch (cmd) {
+            //无操作数，跳出
+            case 0:
+            case 1:
+                break;
+            //双操作数指令，先分析第2个操作数（源操作数）
+            case 3:
+            case 5:
+            case 6:
+                len_b = strlen(sb);//双操作数的源操作数长度
+                if (len_b == 2) {//寄存器寻址
+                    tb = 2;//操作数在寄存器，va表示寄存器下标
+                    vb = sb[0] - 'A';//表示寄存器数组中的下标
+                } else if (len_b == 3) {//寄存器间接寻址，操作数有前导T表示它是地址
+                    tb = 1;//操作数在存储器，va表示存储器地址
+                    vb = reg[sb[1] - 'A'];//从寄存器数组中取出操作数地址
+                } else if (len_b == 4) {//立即数寻址
+                    tb = 0;//操作数是立即数，va表示立即数的值
+                    vb = get_val(sb, 4);//立即数的值
+                } else if (len_b == 5) {//直接寻址，操作数有前导T表示它是地址
+                    tb = 1;//操作数在存储器，va表示存储器地址
+                    vb = get_val(sb + 1, 4);//立即数作为操作数地址
+                }
+                //分析第一个操作数
+            default:
+                len_a = strlen(sa);//第一个操作数长度
+                if (len_a == 2) {
+                    ta = 2;
+                    va = sa[0] - 'A';
+                } else if (len_a == 3) {
+                    ta = 1;
+                    va = reg[sa[1] - 'A'];
+                } else if (len_a == 4) {
+                    ta = 0;
+                    va = get_val(sa, 4);
+                } else if (len_a == 5) {
+                    ta = 1;
+                    va = get_val(sa + 1, 4);
+                }
+        }
+
+//    printf("<%s> ", CMD[cmd]);
+//    if (ta >= 0) printf("[%04X] ", va);
+//    if (tb >= 0) printf("[%04X]", vb);
+//    puts("");
+    }
+
+    int count = 0;
+    //根据指令分析结果执行真正的寻址操作，获取操作数，放入a,b
+    bool process() {
+
+        unsigned a, b;
+        //ta=1，获取存储器中连续2个字节
+        //操作数的值=高字节左移8位+低字节
+        if (ta == 1) a = (mem[va + 1] << 8) | mem[va];//操作数在存储器，va表示存储器地址
+        else if (ta == 2) a = reg[va];//操作数在寄存器，va表示寄存器下标
+        else if (ta == 0) a = va;//操作数是立即数，va表示立即数的值
+        if (tb == 1) b = (mem[vb + 1] << 8) | mem[vb];
+        else if (tb == 2) b = reg[vb];
+        else if (tb == 0) b = vb;
+
+//      printf("[%04X], [%04X]\n", a, b);
+        switch (cmd) {
+            //格式化输出4位(04)大写(X)十六进制数值
+            case 2:
+                printf("%04X\n", a);
+                break;
+
+            case 3://ADD
+                //先做加法，然后按位与0FFFFH得低16位
+                //这里变量类型是unsigned int 其实直接用unsigned short更方便
+                a += b;
+                a &= 0xffff;
+                //如果目的操作数位于存储器，应该先后存高字节（操作数右移8位）和低字节
+                if (ta == 1) mem[va + 1] = (a >> 8), mem[va] = a & 0xff;
+                else if (ta == 2) reg[va] = a;
+//				printf("<%04hX>\n", mem[vb + 1] << 8 | mem[vb]);
+                break;
+
+            case 4://INC
+                a++;
+                a &= 0xffff;
+                if (ta == 1) mem[va + 1] = (a >> 8), mem[va] = a & 0xff;
+                else if (ta == 2) reg[va] = a;
+                break;
+
+            case 5://MOV
+                if (ta == 1) mem[va + 1] = (b >> 8), mem[va] = b & 0xff;
+                else if (ta == 2) reg[va] = b;
+//      printf("(%04X)\n", mem[va + 1] << 8 | mem[va]);
+                break;
+
+            case 6://CMP
+                if (a < b) cmp_result = 1;//L
+
+
+                else if (a > b) cmp_result = 3;//G
+                else cmp_result = 2;//E
+                break;
+
+            case 7://JMP，其中a-1是第a条指令在数组中的位置
+                //由于每条指令执行完毕之后，程序计数器PC都要自增，因此需要使自增结果为a-1
+                //所以将程序计数器修改为目标值-1，即a-2
+                PC = (int) a - 2;
+                break;
+
+            case 8://JG
+                if (cmp_result == 3) PC = (int) a - 2;
+                break;
+
+            case 9://JL
+                if (cmp_result == 1) PC = (int) a - 2;
+                break;
+
+            case 10://JE
+                if (cmp_result == 2) PC = (int) a - 2;
+                break;
+
+            case 11://JNG
+                if (cmp_result <= 2) PC = (int) a - 2;
+                break;
+
+            case 12://JNL
+                if (cmp_result >= 2) PC = (int) a - 2;
+                break;
+
+            case 13://JNE
+                if (cmp_result != 2) PC = (int) a - 2;
+                break;
+
+        }
+
+        PC++;
+
+        count++;//已执行指令条数
+        //STOP
+        if (cmd == 1) return false;
+        //已执行条数超过预设值
+        if (count >= 1000000) {
+            puts("TLE");
+            return false;
+        }
+        return true;
+    }
+
+    int check_error() {
+        //未比较，但尝试跳转
+        if (cmd > 7 && cmp_result == 0) return 4;
+        //在存储器中寻址超出预设范围
+        if (ta == 1 && (va < 0x3000 || va >= 0xafff)) return 2;
+        if (tb == 1 && (vb < 0x3000 || vb >= 0xafff)) return 2;
+        if (cmd >= 7) {
+            //按寻址方式获取操作数的值，值的含义是目标指令的序数
+            unsigned a = 0;
+            if (ta == 1) a = mem[va + 1] << 8 | mem[va];//操作数在存储器，va表示存储器地址
+            else if (ta == 2) a = reg[va];//操作数在寄存器，va表示寄存器下标
+            else if (ta == 0) a = va;//操作数是立即数，va表示立即数的值
+            //符合跳转条件，但目标序数有误（等于1时相应指令为RUN，或序数>总行数）
+            if (cmd == 7 ||
+                (cmd == 8 && cmp_result == 3) ||
+                (cmd == 9 && cmp_result == 1) ||
+                (cmd == 10 && cmp_result == 2) ||
+                (cmd == 11 && cmp_result <= 2) ||
+                (cmd == 12 && cmp_result >= 2) ||
+                (cmd == 13 && cmp_result != 2)) {
+                if (a < 2u || a > (unsigned) lines) return 3;
+            }
+        }
+        //无错误
+        return 0;
+    }
+
+    bool next() {
+        read_next();
+        translate();
+        int error = check_error();
+        if (error) {
+            if (error == 4) puts("CMP_MISSING");
+            if (error == 3) puts("RUNTIME_ERROR");
+            if (error == 2) puts("ACCESS_VIOLATION");
+            return false;
+        }
+        return process();
+    }
+
+    void print_code()
+    {
+        for(int i=0;i<lines;i++)
+        {
+            printf("%04X\t%s",i+1,code[i]);
+        }
+    }
+
+    void print_next_line()
+    {
+        puts(code[PC]);
+    }
+
+    void print_registers()
+    {
+        for(int i=0;i<4;i++)
+        {
+            printf("%cX=%04X\t",'A'+i, reg[i]);
+        }
+        printf("PC=%04X\n",PC+1);
+    }
+
+    void print_single_register(int v)
+    {
+        printf("%cX=%04X\n",'A'+v, reg[v]);
+    }
+
+    void dump(char* debug_cmd)
+    {
+        int dump_start=get_val(debug_cmd+2,4),current;
+        if(dump_start>=0)
+        {
+            current=dump_start;
+            for(int i=0;i<8;i++)
+            {
+                printf("%04X\t",current);
+                for(int j=0;j<7;j++)
+                {
+                    printf("%02X ",mem[current]);
+                    current++;
+                }
+                printf("%02X",mem[current]);
+                current++;
+                printf("-");
+                for(int j=0;j<8;j++)
+                {
+                    printf("%02X ",mem[current]);
+                    current++;
+                }
+                putchar('\n');
+            }
+        }
+    }
+} vm;
+
+int main() {
+    //freopen("input.txt", "r", stdin);
+    //vm.read();
+    //while (vm.next());
+    //fclose(stdin);
+    vm.fp=fopen("2-2-3.txt", "r");
+    vm.read();
+    fclose(vm.fp);
+    char debug_cmd[16]={0};
+    printf("-");
+    while(!vm.terminated)
+    {
+        fgets(debug_cmd,15,stdin);
+        debug_cmd[strlen(debug_cmd)-1]=0;
+        if(!strcmp(debug_cmd,"q"))
+        {
+            break;
+        }
+        switch(debug_cmd[0])
+        {
+            case 'u'://打印汇编代码
+                if(debug_cmd[1]==0)
+                {
+                    vm.print_code();
+                }
+                break;
+
+            case 't':
+                if (vm.next())
+                {
+                    vm.print_registers();
+                    vm.print_next_line();
+                }
+                else
+                {
+                    vm.terminated=1;
+                }
+                break;
+            case 'r':
+                if(debug_cmd[1]==0)
+                {
+                    vm.print_registers();
+                    vm.print_next_line();
+                }
+                else if(debug_cmd[1]==' ')
+                {
+                    if(debug_cmd[2]>='A'&&debug_cmd[2]<='D')
+                    {
+                        debug_cmd[2]-=0x20;
+                    }
+                    if(debug_cmd[2]>='a'&&debug_cmd[2]<='d')
+                    {
+                        vm.print_single_register(debug_cmd[2]-'a');
+                        vm.print_next_line();
+                    }
+                }
+                break;
+            case 'd':
+                if(debug_cmd[2]&&strlen(debug_cmd+2)==4)
+                {
+                    vm.dump(debug_cmd);
+                }
+                break;
+        }
+        if(!vm.terminated)
+            printf("\n-");
+    }
+    fclose(stdin);
+	system("pause");
+    return 0;
+}
